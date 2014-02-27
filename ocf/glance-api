@@ -265,6 +265,9 @@ glance_api_start() {
         return $OCF_SUCCESS
     fi
 
+    # run DB migrations
+    su ${OCF_RESKEY_user} -s /bin/sh -c "glance-manage db_sync"
+
     # run the actual glance-api daemon. Don't use ocf_run as we're sending the tool's output
     # straight to /dev/null anyway and using ocf_run would break stdout-redirection here.
     su ${OCF_RESKEY_user} -s /bin/sh -c "${OCF_RESKEY_binary} --config-file $OCF_RESKEY_config \

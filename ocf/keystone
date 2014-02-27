@@ -267,6 +267,9 @@ keystone_start() {
         return $OCF_SUCCESS
     fi
 
+    # run DB migrations
+    su ${OCF_RESKEY_user} -s /bin/sh -c "keystone-manage --config-file=$OCF_RESKEY_config db_sync" > /dev/null
+
     # run the actual keystone daemon. Don't use ocf_run as we're sending the tool's output
     # straight to /dev/null anyway and using ocf_run would break stdout-redirection here.
     su ${OCF_RESKEY_user} -s /bin/sh -c "${OCF_RESKEY_binary} --config-file $OCF_RESKEY_config \
