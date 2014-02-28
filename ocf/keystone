@@ -25,6 +25,8 @@
 #   OCF_RESKEY_user
 #   OCF_RESKEY_pid
 #   OCF_RESKEY_additional_parameters
+#   OCF_RESKEY_service
+#   OCF_RESKEY_use_service
 #######################################################################
 # Initialization:
 
@@ -40,12 +42,17 @@ OCF_RESKEY_config_default="/etc/keystone/keystone.conf"
 OCF_RESKEY_pid_default="$HA_RSCTMP/$OCF_RESOURCE_INSTANCE.pid"
 OCF_RESKEY_user_default="keystone"
 OCF_RESKEY_client_binary_default="keystone"
+#FIXME: currently wrong defaults; should be keystone / false
+OCF_RESKEY_service_default="openstack-keystone"
+OCF_RESKEY_use_service_default="true"
 
 : ${OCF_RESKEY_binary=${OCF_RESKEY_binary_default}}
 : ${OCF_RESKEY_config=${OCF_RESKEY_config_default}}
 : ${OCF_RESKEY_user=${OCF_RESKEY_user_default}}
 : ${OCF_RESKEY_pid=${OCF_RESKEY_pid_default}}
 : ${OCF_RESKEY_client_binary=${OCF_RESKEY_client_binary_default}}
+: ${OCF_RESKEY_service=${OCF_RESKEY_service_default}}
+: ${OCF_RESKEY_use_service=${OCF_RESKEY_use_service_default}}
 
 #######################################################################
 
@@ -160,6 +167,22 @@ Additional parameters to pass on to the Keystone server (keystone-all)
 <content type="string" />
 </parameter>
 
+<parameter name="service" unique="0" required="0">
+<longdesc lang="en">
+Name of the Keystone LSB service
+</longdesc>
+<shortdesc lang="en">Name of the Keystone LSB service</shortdesc>
+<content type="string" default="${OCF_RESKEY_service}" />
+</parameter>
+
+<parameter name="use_service" unique="0" required="0">
+<longdesc lang="en">
+Whether to use the Keystone LSB service instead of OCF-specific commands for start/stop/status
+</longdesc>
+<shortdesc lang="en">Whether to use the Keystone LSB service</shortdesc>
+<content type="boolean" default="${OCF_RESKEY_use_service}" />
+</parameter>
+
 </parameters>
 
 <actions>
@@ -200,27 +223,47 @@ keystone_validate() {
         return $OCF_ERR_INSTALLED
     fi
 
+    if ocf_is_true "$OCF_RESKEY_use_service"; then
+        if [ ! -f "/etc/init.d/$OCF_RESKEY_service" ]; then
+            ocf_log err "Service $OCF_RESKEY_service doesn't exist"
+            return $OCF_ERR_INSTALLED
+        fi
+    fi
+
     true
 }
 
 keystone_status() {
-    local pid
     local rc
 
-    if [ ! -f $OCF_RESKEY_pid ]; then
-        ocf_log info "OpenStack Identity (Keystone) is not running"
-        return $OCF_NOT_RUNNING
-    else
-    pid=`cat $OCF_RESKEY_pid`
-    fi
+    if ocf_is_true "$OCF_RESKEY_use_service"; then
+        service "$OCF_RESKEY_service" status > /dev/null 2>&1
+        rc=$?
 
-    ocf_run -warn kill -s 0 $pid
-    rc=$?
-    if [ $rc -eq 0 ]; then
-        return $OCF_SUCCESS
+        if [ $rc -eq 0 ]; then
+            return $OCF_SUCCESS
+        else
+            ocf_log info "OpenStack Identity (Keystone) is not running"
+            return $OCF_NOT_RUNNING
+        fi
     else
-        ocf_log info "Old PID file found, but OpenStack Identity (Keystone) is not running"
-        return $OCF_NOT_RUNNING
+        local pid
+
+        if [ ! -f $OCF_RESKEY_pid ]; then
+            ocf_log info "OpenStack Identity (Keystone) is not running"
+            return $OCF_NOT_RUNNING
+        else
+            pid=`cat $OCF_RESKEY_pid`
+        fi
+
+        ocf_run -warn kill -s 0 $pid
+        rc=$?
+        if [ $rc -eq 0 ]; then
+            return $OCF_SUCCESS
+        else
+            ocf_log info "Old PID file found, but OpenStack Identity (Keystone) is not running"
+            return $OCF_NOT_RUNNING
+        fi
     fi
 }
 
@@ -267,13 +310,17 @@ keystone_start() {
         return $OCF_SUCCESS
     fi
 
-    # run DB migrations
-    su ${OCF_RESKEY_user} -s /bin/sh -c "keystone-manage --config-file=$OCF_RESKEY_config db_sync" > /dev/null
+    if ocf_is_true "$OCF_RESKEY_use_service"; then
+        service "$OCF_RESKEY_service" start > /dev/null 2>&1
+    else
+        # run DB migrations
+        su ${OCF_RESKEY_user} -s /bin/sh -c "keystone-manage --config-file=$OCF_RESKEY_config db_sync" > /dev/null
 
-    # run the actual keystone daemon. Don't use ocf_run as we're sending the tool's output
-    # straight to /dev/null anyway and using ocf_run would break stdout-redirection here.
-    su ${OCF_RESKEY_user} -s /bin/sh -c "${OCF_RESKEY_binary} --config-file $OCF_RESKEY_config \
-      $OCF_RESKEY_additional_parameters"' >> /dev/null 2>&1 & echo $!' > $OCF_RESKEY_pid
+        # run the actual keystone daemon. Don't use ocf_run as we're sending the tool's output
+        # straight to /dev/null anyway and using ocf_run would break stdout-redirection here.
+        su ${OCF_RESKEY_user} -s /bin/sh -c "${OCF_RESKEY_binary} --config-file $OCF_RESKEY_config \
+          $OCF_RESKEY_additional_parameters"' >> /dev/null 2>&1 & echo $!' > $OCF_RESKEY_pid
+    fi
 
     # Spin waiting for the server to come up.
     # Let the CRM/LRM time us out if required
@@ -303,13 +350,17 @@ keystone_stop() {
         return $OCF_SUCCESS
     fi
 
-    # Try SIGTERM
-    pid=`cat $OCF_RESKEY_pid`
-    ocf_run kill -s TERM $pid
-    rc=$?
-    if [ $rc -ne 0 ]; then
-        ocf_log err "OpenStack Identity (Keystone) couldn't be stopped"
-        exit $OCF_ERR_GENERIC
+    if ocf_is_true "$OCF_RESKEY_use_service"; then
+        service "$OCF_RESKEY_service" stop > /dev/null 2>&1
+    else
+        # Try SIGTERM
+        pid=`cat $OCF_RESKEY_pid`
+        ocf_run kill -s TERM $pid
+        rc=$?
+        if [ $rc -ne 0 ]; then
+            ocf_log err "OpenStack Identity (Keystone) couldn't be stopped"
+            exit $OCF_ERR_GENERIC
+        fi
     fi
 
     # stop waiting
@@ -332,15 +383,23 @@ keystone_stop() {
     keystone_status
     rc=$?
     if [ $rc -ne $OCF_NOT_RUNNING ]; then
-        # SIGTERM didn't help either, try SIGKILL
-        ocf_log info "OpenStack Identity (Keystone) failed to stop after ${shutdown_timeout}s \
-          using SIGTERM. Trying SIGKILL ..."
-        ocf_run kill -s KILL $pid
+        if ocf_is_true "$OCF_RESKEY_use_service"; then
+            ocf_log info "OpenStack Identity (Keystone) failed to stop after ${shutdown_timeout}s. \
+              Trying SIGKILL ..."
+            /sbin/killproc -KILL $OCF_RESKEY_binary
+        else
+            # SIGTERM didn't help either, try SIGKILL
+            ocf_log info "OpenStack Identity (Keystone) failed to stop after ${shutdown_timeout}s \
+              using SIGTERM. Trying SIGKILL ..."
+            ocf_run kill -s KILL $pid
+        fi
     fi
 
     ocf_log info "OpenStack Identity (Keystone) stopped"
 
-    rm -f $OCF_RESKEY_pid
+    if ! ocf_is_true "$OCF_RESKEY_use_service"; then
+        rm -f $OCF_RESKEY_pid
+    fi
 
     return $OCF_SUCCESS
 }
