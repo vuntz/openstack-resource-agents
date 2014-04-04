@@ -22,6 +22,8 @@
 #   OCF_RESKEY_amqp_server_port
 #   OCF_RESKEY_zeromq
 #   OCF_RESKEY_additional_parameters
+#   OCF_RESKEY_service
+#   OCF_RESKEY_use_service
 #######################################################################
 # Initialization:
 
@@ -38,6 +40,8 @@ OCF_RESKEY_user_default="heat"
 OCF_RESKEY_pid_default="$HA_RSCTMP/$OCF_RESOURCE_INSTANCE.pid"
 OCF_RESKEY_amqp_server_port_default="5672"
 OCF_RESKEY_zeromq_default="false"
+OCF_RESKEY_service_default="heat"
+OCF_RESKEY_use_service_default="false"
 
 : ${OCF_RESKEY_binary=${OCF_RESKEY_binary_default}}
 : ${OCF_RESKEY_config=${OCF_RESKEY_config_default}}
@@ -45,6 +49,8 @@ OCF_RESKEY_zeromq_default="false"
 : ${OCF_RESKEY_pid=${OCF_RESKEY_pid_default}}
 : ${OCF_RESKEY_amqp_server_port=${OCF_RESKEY_amqp_server_port_default}}
 : ${OCF_RESKEY_zeromq=${OCF_RESKEY_zeromq_default}}
+: ${OCF_RESKEY_service=${OCF_RESKEY_service_default}}
+: ${OCF_RESKEY_use_service=${OCF_RESKEY_use_service_default}}
 
 #######################################################################
 
@@ -135,6 +141,23 @@ Additional parameters to pass on to the OpenStack Orchestration Engine Service (
 <content type="string" />
 </parameter>
 
+<parameter name="service" unique="0" required="0">
+<longdesc lang="en">
+Name of the OpenStack Orchestration Engine LSB service
+</longdesc>
+<shortdesc lang="en">Name of the Heat Engine LSB service</shortdesc>
+<content type="string" default="${OCF_RESKEY_service}" />
+</parameter>
+
+<parameter name="use_service" unique="0" required="0">
+<longdesc lang="en">
+Whether to use the OpenStack Orchestration Engine LSB service instead of OCF-specific commands for start/stop/status
+</longdesc>
+<shortdesc lang="en">Whether to use the Heat Engine LSB service</shortdesc>
+<content type="boolean" default="${OCF_RESKEY_use_service}" />
+</parameter>
+
+
 </parameters>
 
 <actions>
@@ -195,27 +218,49 @@ heat_engine_validate() {
         return $OCF_ERR_INSTALLED
     fi
 
+    if ocf_is_true "$OCF_RESKEY_use_service"; then
+        chkconfig -c "$OCF_RESKEY_service"
+        rc=$?
+        if [ $rc -ne 0 ]; then
+            ocf_log err "Service $OCF_RESKEY_service doesn't exist"
+            return $OCF_ERR_INSTALLED
+        fi
+    fi
+
     true
 }
 
 heat_engine_status() {
-    local pid
     local rc
 
-    if [ ! -f $OCF_RESKEY_pid ]; then
-        ocf_log info "OpenStack Orchestration Engine (heat-engine) is not running"
-        return $OCF_NOT_RUNNING
-    else
-        pid=`cat $OCF_RESKEY_pid`
-    fi
+    if ocf_is_true "$OCF_RESKEY_use_service"; then
+        service "$OCF_RESKEY_service" status > /dev/null 2>&1
+        rc=$?
 
-    ocf_run -warn kill -s 0 $pid
-    rc=$?
-    if [ $rc -eq 0 ]; then
-        return $OCF_SUCCESS
+        if [ $rc -eq 0 ]; then
+            return $OCF_SUCCESS
+        else
+            ocf_log info "OpenStack Orchestration Engine (heat-engine) is not running"
+            return $OCF_NOT_RUNNING
+        fi
     else
-        ocf_log info "Old PID file found, but OpenStack Orchestration Engine (heat-engine) is not running"
-        return $OCF_NOT_RUNNING
+        local pid
+
+        if [ ! -f $OCF_RESKEY_pid ]; then
+            ocf_log info "OpenStack Orchestration Engine (heat-engine) is not running"
+            return $OCF_NOT_RUNNING
+        else
+            pid=`cat $OCF_RESKEY_pid`
+        fi
+
+        ocf_run -warn kill -s 0 $pid
+        rc=$?
+        if [ $rc -eq 0 ]; then
+            return $OCF_SUCCESS
+        else
+            ocf_log info "Old PID file found, but OpenStack Orchestration Engine (heat-engine) is not running"
+            return $OCF_NOT_RUNNING
+        fi
     fi
 }
 
@@ -257,10 +302,13 @@ heat_engine_start() {
         return $OCF_SUCCESS
     fi
 
-    # run the actual heat-engine daemon. Don't use ocf_run as we're sending the tool's output
-    # straight to /dev/null anyway and using ocf_run would break stdout-redirection here.
-    su ${OCF_RESKEY_user} -s /bin/sh -c "${OCF_RESKEY_binary} --config-file=$OCF_RESKEY_config \
-       $OCF_RESKEY_additional_parameters"' >> /dev/null 2>&1 & echo $!' > $OCF_RESKEY_pid
+    if ocf_is_true "$OCF_RESKEY_use_service"; then
+        service "$OCF_RESKEY_service" start > /dev/null 2>&1
+    else
+      # straight to /dev/null anyway and using ocf_run would break stdout-redirection here.
+      su ${OCF_RESKEY_user} -s /bin/sh -c "${OCF_RESKEY_binary} --config-file=$OCF_RESKEY_config \
+        $OCF_RESKEY_additional_parameters"' >> /dev/null 2>&1 & echo $!' > $OCF_RESKEY_pid
+    fi
 
     # Spin waiting for the server to come up.
     while true; do
@@ -289,13 +337,17 @@ heat_engine_stop() {
         return $OCF_SUCCESS
     fi
 
-    # Try SIGTERM
-    pid=`cat $OCF_RESKEY_pid`
-    ocf_run kill -s TERM $pid
-    rc=$?
-    if [ $rc -ne 0 ]; then
-        ocf_log err "OpenStack Orchestration Engine (heat-engine) couldn't be stopped"
-        exit $OCF_ERR_GENERIC
+    if ocf_is_true "$OCF_RESKEY_use_service"; then
+        service "$OCF_RESKEY_service" stop > /dev/null 2>&1
+    else
+        # Try SIGTERM
+        pid=`cat $OCF_RESKEY_pid`
+        ocf_run kill -s TERM $pid
+        rc=$?
+        if [ $rc -ne 0 ]; then
+            ocf_log err "OpenStack Orchestration Engine (heat-engine) couldn't be stopped"
+            exit $OCF_ERR_GENERIC
+        fi
     fi
 
     # stop waiting
@@ -318,15 +370,23 @@ heat_engine_stop() {
     heat_engine_status
     rc=$?
     if [ $rc -ne $OCF_NOT_RUNNING ]; then
-        # SIGTERM didn't help either, try SIGKILL
-        ocf_log info "OpenStack Orchestration Engine (heat-engine) failed to stop after ${shutdown_timeout}s \
-          using SIGTERM. Trying SIGKILL ..."
-        ocf_run kill -s KILL $pid
+        if ocf_is_true "$OCF_RESKEY_use_service"; then
+            ocf_log info "OpenStack Orchestration Engine (heat-engine) failed to stop after ${shutdown_timeout}s \
+              Trying SIGKILL ..."
+            /sbin/killproc -KILL $OCF_RESKEY_binary
+        else
+            # SIGTERM didn't help either, try SIGKILL
+            ocf_log info "OpenStack Orchestration Engine (heat-engine) failed to stop after ${shutdown_timeout}s \
+              using SIGTERM. Trying SIGKILL ..."
+            ocf_run kill -s KILL $pid
+        fi
     fi
 
     ocf_log info "OpenStack Orchestration Engine (heat-engine) stopped"
 
-    rm -f $OCF_RESKEY_pid
+    if ! ocf_is_true "$OCF_RESKEY_use_service"; then
+        rm -f $OCF_RESKEY_pid
+    fi
 
     return $OCF_SUCCESS
 }
